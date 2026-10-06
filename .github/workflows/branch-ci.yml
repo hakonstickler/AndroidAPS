@@ -195,9 +195,8 @@ jobs:
       - name: Set up JDK
         uses: actions/setup-java@v5
         with:
-          # Java version is defined in .github/versions.env
-          java-version: ${{ env.JAVA_VERSION }}
-          distribution: 'temurin'
+          java-version: '21'
+          distribution: 'jetbrains'
           cache: gradle
 
       - name: Grant execute permission for gradlew
