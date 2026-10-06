@@ -195,7 +195,8 @@ jobs:
       - name: Set up JDK
         uses: actions/setup-java@v5
         with:
-          java-version: '21'
+          # Java version is defined in .github/versions.env
+          java-version: ${{ env.JAVA_VERSION }}
           distribution: 'jetbrains'
           cache: gradle
 
