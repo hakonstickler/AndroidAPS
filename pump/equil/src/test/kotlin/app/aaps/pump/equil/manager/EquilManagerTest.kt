@@ -1,5 +1,6 @@
 package app.aaps.pump.equil.manager
 
+import app.aaps.core.data.model.TE
 import app.aaps.core.data.pump.defs.PumpType
 import app.aaps.core.interfaces.pump.BolusProgressData
 import app.aaps.core.interfaces.pump.DetailedBolusInfo
@@ -245,11 +246,14 @@ class EquilManagerTest : TestBaseWithProfile() {
         // The rewinds used to raise "auto off" twice per reservoir change.
         assertEquals(emptyList<EventEquilAlarm>(), alarms)
         verify(pumpSync, never()).syncTemporaryBasalWithPumpId(any(), any(), any(), any(), any(), any(), any(), any())
+        // Nothing for the careportal either: a reservoir change is recorded by the wizard.
+        verify(pumpSync, never()).insertTherapyEventIfNewWithTimestamp(any(), any(), anyOrNull(), anyOrNull(), any(), any())
     }
 
     @Test
     fun `a dead battery gets a 0 U per hour gap until delivery starts again (real records 1561-1568)`() = runTest {
         prepareHistory()
+        whenever(rh.gs(R.string.equil_history_item16)).thenReturn("Battery empty!")
         val alarms = collectAlarms()
         val empty = now - 300 * minute
         val powerOn = now - 10 * minute
@@ -274,6 +278,9 @@ class EquilManagerTest : TestBaseWithProfile() {
         assertEquals(listOf(4800 * minute, delivering - empty), durations.allValues)
         assertEquals(null, equilManager.equilState?.deliveryStoppedAt)
         assertEquals(emptyList<EventEquilAlarm>(), alarms)
+        // No alarm (the pump was dead), but the careportal shows when and why it stopped (#4132).
+        verify(pumpSync).insertTherapyEventIfNewWithTimestamp(eq(empty), eq(TE.Type.ANNOUNCEMENT), eq("Battery empty!"), anyOrNull(), eq(PumpType.EQUIL), eq("7000F3"))
+        verify(pumpSync, times(1)).insertTherapyEventIfNewWithTimestamp(any(), any(), anyOrNull(), anyOrNull(), any(), any())
     }
 
     @Test
@@ -322,6 +329,9 @@ class EquilManagerTest : TestBaseWithProfile() {
             eq(empty), argThat<PumpRate> { cU == 0.0 }, eq(4800 * minute), eq(true), eq(PumpSync.TemporaryBasalType.PUMP_SUSPEND), eq(empty), eq(PumpType.EQUIL), eq("7000F3")
         )
         assertEquals(empty, equilManager.equilState?.deliveryStoppedAt)
+        // In the careportal at the pump's time; "reservoir low" (4, 1, 1) is not recorded.
+        verify(pumpSync).insertTherapyEventIfNewWithTimestamp(eq(empty), eq(TE.Type.ANNOUNCEMENT), eq("Reservoir empty"), anyOrNull(), eq(PumpType.EQUIL), eq("7000F3"))
+        verify(pumpSync, times(1)).insertTherapyEventIfNewWithTimestamp(any(), any(), anyOrNull(), anyOrNull(), any(), any())
     }
 
     @Test
@@ -351,7 +361,7 @@ class EquilManagerTest : TestBaseWithProfile() {
         val result = pumpEnactResultProvider().success(true).enacted(true).bolusDelivered(12.0)
         readEmptyReservoirHistory() // read right after the bolus
 
-        equilManager.correctBolusIfDeliveryStopped(result, bolus, bolusStart, bolusEnd)
+        equilManager.correctBolusIfDeliveryStopped(result, bolus, bolusStart, bolusEnd, 12.0 / 480)
 
         // 477 s x 1.5 U/min = 11.925 U, rounded up to the 0.05 U step.
         assertEquals(11.95, result.bolusDelivered, 0.0001)
@@ -370,10 +380,35 @@ class EquilManagerTest : TestBaseWithProfile() {
         val result = pumpEnactResultProvider().success(true).enacted(true).bolusDelivered(2.0)
         equilManager.decodeHistory(historyRecord(1714, bolusStart - 60 * minute, 4, 1, 2))
 
-        equilManager.correctBolusIfDeliveryStopped(result, bolus, bolusStart, bolusStart + 80_000)
+        equilManager.correctBolusIfDeliveryStopped(result, bolus, bolusStart, bolusStart + 80_000, 2.0 / 80)
 
         assertEquals(2.0, result.bolusDelivered, 0.0001)
         verify(pumpSync, never()).syncBolusWithPumpId(any(), any(), anyOrNull(), any(), any(), any())
+    }
+
+    @Test
+    fun `a bolus the pump stopped as abnormal records what was given (real records 1741-1743)`() = runTest {
+        prepareHistory()
+        whenever(rh.gs(R.string.equil_history_item18)).thenReturn("Abnormal infusion stopped")
+        whenever(rh.gs(eq(R.string.equil_bolus_stopped), anyOrNull(), anyOrNull())).thenReturn("Bolus stopped")
+        val alarms = collectAlarms()
+        // 1 U sent with 2 s (30 U/min): the pump stopped it in the same second and rewound.
+        val bolus = DetailedBolusInfo().apply { insulin = 1.0; timestamp = bolusStart }
+        val result = pumpEnactResultProvider().success(true).enacted(true).bolusDelivered(1.0)
+        listOf(
+            historyRecord(1741, bolusStart, 4, 11, 0),     // TBR end
+            historyRecord(1742, bolusStart, 5, 1, 2),      // abnormal infusion stopped
+            historyRecord(1743, bolusStart, 4, 8, 0)       // rewind
+        ).forEach { equilManager.decodeHistory(it) }
+
+        equilManager.correctBolusIfDeliveryStopped(result, bolus, bolusStart, bolusStart + 40_000, 1.0 / 2)
+
+        // Nothing was given; it used to be recorded as 1 U. The pump also stopped basal.
+        assertEquals(0.0, result.bolusDelivered, 0.0001)
+        assertEquals(listOf("Abnormal infusion stopped", "Bolus stopped"), alarms.map { it.tips })
+        verify(pumpSync).syncTemporaryBasalWithPumpId(
+            eq(bolusStart), any(), eq(4800 * minute), any(), eq(PumpSync.TemporaryBasalType.PUMP_SUSPEND), eq(bolusStart), any(), any()
+        )
     }
 
     @Test
