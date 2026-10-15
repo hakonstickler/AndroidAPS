@@ -14,6 +14,7 @@ import app.aaps.core.data.model.SC
 import app.aaps.core.data.model.TB
 import app.aaps.core.data.model.TE
 import app.aaps.core.data.model.TT
+import app.aaps.core.data.model.endOf
 import app.aaps.core.data.model.latestRunningAt
 import app.aaps.core.data.time.T
 import app.aaps.core.interfaces.InterfacesStrings
@@ -883,7 +884,7 @@ class OverviewDataCacheImpl(
                     amount = bs.amount,
                     bolusType = if (bs.type == BS.Type.SMB) BolusType.SMB else BolusType.NORMAL,
                     isValid = bs.isValid,
-                    label = decimalFormatter.toPumpSupportedBolus(bs.amount, bolusStep)
+                    label = decimalFormatter.toPumpSupportedBolusWithUnits(bs.amount, bolusStep)
                 )
             }
 
@@ -915,7 +916,7 @@ class OverviewDataCacheImpl(
 
         // Therapy events
         val therapyEventPoints = persistenceLayer.getTherapyEventDataFromToTime(fromTime - T.hours(6).msecs(), toTime)
-            .filter { te -> te.timestamp + te.duration >= fromTime && te.timestamp <= toTime }
+            .filter { te -> endOf(te.timestamp, te.duration) >= fromTime && te.timestamp <= toTime }
             .map { te ->
                 val teType = when {
                     te.type == TE.Type.NS_MBG                -> TherapyEventType.MBG
