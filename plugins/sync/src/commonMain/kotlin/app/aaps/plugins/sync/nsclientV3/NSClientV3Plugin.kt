@@ -35,6 +35,7 @@ import app.aaps.core.interfaces.sync.NsClient
 import app.aaps.core.interfaces.sync.Sync
 import app.aaps.core.interfaces.utils.DateUtil
 import app.aaps.core.interfaces.utils.DecimalFormatter
+import app.aaps.core.interfaces.scenes.ClientControlSendResult
 import app.aaps.core.keys.BooleanKey
 import app.aaps.core.keys.BooleanNonKey
 import app.aaps.core.keys.IntKey
@@ -119,6 +120,9 @@ import kotlin.concurrent.Volatile
 import kotlin.concurrent.atomics.AtomicBoolean
 import kotlin.concurrent.atomics.ExperimentalAtomicApi
 import dev.zacsweers.metro.IntKey as MetroIntKey
+
+/** The Nightscout address as the setting holds it, in the form `NSAndroidClientImpl` takes: no scheme, no last slash. */
+internal fun nsClientBaseUrl(url: String): String = url.lowercase().replace("https://", "").replace(Regex("/$"), "")
 
 // The new atomics are still experimental; pendingLoop/pendingUpload use load/store/compareAndSet.
 @OptIn(ExperimentalAtomicApi::class)
@@ -210,7 +214,7 @@ class NSClientV3Plugin(
                 lastOperationError != null                                                            -> rh.gs(CoreUiStrings.error)
                 nsAndroidClient?.lastStatus == null                                                   -> rh.gs(SyncStrings.not_connected)
                 nsLoadExecutor.isRunning                                                                       -> rh.gs(SyncStrings.working)
-                nsAndroidClient?.lastStatus?.apiPermissions?.isFull() == true                         -> rh.gs(InterfacesStrings.authorized)
+                hasWritePermission                                                                    -> rh.gs(InterfacesStrings.authorized)
                 nsAndroidClient?.lastStatus?.apiPermissions?.isRead() == true                         -> rh.gs(SyncStrings.read_only)
                 else                                                                                  -> rh.gs(CoreUiStrings.unknown)
             }
@@ -265,7 +269,18 @@ class NSClientV3Plugin(
         // fast, and the bundled config re-fetch picks up anything missed while disconnected.
         if (config.AAPSCLIENT) {
             scope.launch {
-                wsConnectedFlow.collect { connected -> if (connected) requestMasterProbe() }
+                wsConnectedFlow.collect { connected ->
+                    if (!connected) return@collect
+                    // A pairing secret still to be replaced: the hello with a key exchange goes out now. Before the
+                    // probe, and awaited: the master takes the counters in order, so a hello signed before a ping it
+                    // has already taken would be refused as a replay.
+                    when (clientControlRoundTrip.sendHelloIfDue()) {
+                        null                              -> Unit
+                        ClientControlSendResult.Success -> nsClientRepository.addLog("► CLIENTCTL", "hello with a new key")
+                        else                              -> aapsLogger.warn(LTag.NSCLIENT, "ClientControl: hello not sent, trying on the next connect")
+                    }
+                    requestMasterProbe()
+                }
             }
         }
         rxBus.toFlow(EventAppExit::class)
@@ -495,7 +510,9 @@ class NSClientV3Plugin(
         }
     }
 
-    override val hasWritePermission: Boolean get() = nsAndroidClient?.lastStatus?.apiPermissions?.isFull() == true
+    // The rights this phone needs: a master writes every collection, a client only reads and writes to settings.
+    override val hasWritePermission: Boolean
+        get() = nsAndroidClient?.lastStatus?.apiPermissions?.let { if (config.AAPSCLIENT) it.isClient() else it.isFull() } == true
     override val connected: Boolean get() = nsAndroidClient?.lastStatus != null
 
     // Canonical WS-state holder. It lives on NsConnection, the singleton that survives service
@@ -647,7 +664,7 @@ class NSClientV3Plugin(
     private fun setClient() {
         if (nsAndroidClient == null)
             nsAndroidClient = NSAndroidClientImpl(
-                baseUrl = preferences.get(StringKey.NsClientUrl).lowercase().replace("https://", "").replace(Regex("/$"), ""),
+                baseUrl = nsClientBaseUrl(preferences.get(StringKey.NsClientUrl)),
                 accessToken = preferences.get(StringKey.NsClientAccessToken),
                 logging = l.findByName(LTag.NSCLIENT.tag).enabled && (config.isEngineeringMode() || config.isDev()),
                 logger = { msg -> aapsLogger.debug(LTag.HTTP, msg) }
