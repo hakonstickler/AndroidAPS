@@ -9,6 +9,9 @@ Instrumented tests that run a real pump driver against its in-tree emulator, thr
 PumpSync and database, with no screen. After each step they compare what AAPS stored with what the emulated pump did.
 They test the core of AAPS and the driver; the screens have their own tests.
 
+What a driver must pass to count as done (driver rules, emulator, scenarios, screens, real pump, CI) is in
+`_docs/PUMP_DRIVER_ACCEPTANCE.md`. This skill is how to build and run it.
+
 Code: `app/src/androidTest/kotlin/app/aaps/e2e/scenario/` (engine `PumpScenario`, shared scenarios
 `AbstractPumpScenarioTest`) and one adapter per pump in `app/src/androidTestPumps/<pump>/`. The test hooks of an
 emulator are `PumpEmulatorControl` in `:core:interfaces`.
@@ -194,3 +197,12 @@ Shard C's logcat can rotate before CI reads it, so the UI base adds the screen t
 - A driver may take the time of a pump record, in whole seconds, as its id (the Diaconn G8 does). A real pump's own
   timing keeps two records of one kind out of one second; an emulator at FAST speed does not, and AAPS then takes two
   records for one. Keep the FAST time of such an action at 1 s or more.
+- The queue's idle check passes in the gap when a driver queues a follow-up (a history read) from a launched coroutine
+  after its command ends. The check then misses the record the read stores, now and then, in CI only. The driver queues
+  it before the command ends: `launch(start = CoroutineStart.UNDISPATCHED)` adds it at once.
+- AAPS can run the profile before the pump has it: the write is queued a moment later. `pair()` waits until the pump
+  gives the profile's basal, or a fault a test sets right after the pairing hits the pairing's write.
+- A report of the pump is not always "ready". The Diaconn G8 reports a basal write at about 23.5 s, then still refuses
+  the start of that basal; it took it at 30.5 s. Test a shorter wait on the real pump before the emulator copies it.
+- A percent pump turns the loop's rate into a percent of the base rate. A trap needs a base on which the rate is a
+  float error away from a step and still under the limits (1 U/h, 200 %): the amount scenario switches to 80 %.
